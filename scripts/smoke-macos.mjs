@@ -17,7 +17,8 @@ const run = (program, args, env = {}) => execFileSync(program, args, { encoding:
 const report = { passed: false, os: run('/usr/bin/sw_vers', ['-productVersion']).trim(), architecture: process.arch,
   realAccount: false, rendering: 'software WebGL in the hosted test VM', rendererErrors: [] };
 if (process.env.EXPECTED_MACOS_MAJOR) assert.equal(report.os.split('.')[0], process.env.EXPECTED_MACOS_MAJOR);
-let electron, server;
+let electron, server, closing = false;
+report.teardownNetworkCancellations = [];
 try {
   // Cold-start the self-contained .NET runtime and parse one original line in a minimal drawing.
   const dxf = join(root, 'one-line.dxf');
@@ -62,7 +63,13 @@ try {
     env: { HOME: home, USER: process.env.USER ?? 'runner', TMPDIR: root, PATH: '/usr/bin:/bin:/usr/sbin:/sbin' }, timeout: 60_000 });
   const page = await electron.firstWindow();
   page.on('pageerror', error => report.rendererErrors.push(error.message));
-  page.on('console', message => { if (message.type() === 'error') report.rendererErrors.push(message.text()); });
+  page.on('console', message => {
+    if (message.type() !== 'error') return;
+    const text = message.text();
+    if (closing && /^Failed to load resource: net::ERR_(?:ABORTED|BLOCKED_BY_CLIENT|CONNECTION_REFUSED)$/.test(text))
+      report.teardownNetworkCancellations.push({ text, url: message.location().url });
+    else report.rendererErrors.push(text);
+  });
   const viewport = page.locator('[data-testid="viewport"]:visible');
   await viewport.waitFor({ state: 'visible', timeout: 90_000 });
   await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="viewport"]')].some(element => /^\d+$/.test(element.getAttribute('data-model-revision') ?? '')), undefined, { timeout: 90_000 });
@@ -80,8 +87,10 @@ try {
   assert.deepEqual(report.rendererErrors, []); report.webgl = true; report.passed = true;
 } catch (error) { report.error = String(error); process.exitCode = 1; }
 finally {
+  closing = true;
   if (electron) await electron.close().catch(() => undefined);
   if (server) await new Promise(done => server.close(done));
+  if (report.rendererErrors.length) { report.passed = false; report.error ??= 'Renderer errors occurred'; process.exitCode = 1; }
   await fs.writeFile(join(output, 'runtime-verification.json'), JSON.stringify(report, null, 2)+'\n');
   await fs.rm(root, { recursive: true, force: true });
 }
