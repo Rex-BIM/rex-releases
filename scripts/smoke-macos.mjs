@@ -15,7 +15,7 @@ await fs.mkdir(home); const resources = join(appPath, 'Contents/Resources');
 const run = (program, args, env = {}) => execFileSync(program, args, { encoding: 'utf8', timeout: 60_000,
   env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: home, TMPDIR: root, ...env } });
 const report = { passed: false, os: run('/usr/bin/sw_vers', ['-productVersion']).trim(), architecture: process.arch,
-  realAccount: false, rendering: 'software WebGL in the hosted test VM', rendererErrors: [] };
+  realAccount: false, rendering: 'software WebGL', rendererErrors: [] };
 if (process.env.EXPECTED_MACOS_MAJOR) assert.equal(report.os.split('.')[0], process.env.EXPECTED_MACOS_MAJOR);
 let electron, server, closing = false;
 report.teardownNetworkCancellations = [];
@@ -91,13 +91,46 @@ try {
   await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
   await page.screenshot({ path: join(output, 'sample-model.png') });
   assert.deepEqual(report.rendererErrors, []); report.webgl = true; report.passed = true;
-} catch (error) { report.error = String(error); process.exitCode = 1; }
+} catch (error) {
+  report.error = String(error); process.exitCode = 1;
+  // Preserve the failing app's state before attempting quit. Everything here belongs to the synthetic fixture.
+  const redact = text => text.replaceAll(root, '<FIXTURE>').replace(/rexs_[A-Za-z0-9_-]+/g, '<SYNTHETIC_TOKEN>');
+  report.appDiagnostics = electron ? { ...electron.diagnostics(), stderr: redact(electron.diagnostics().stderr).slice(-16_000) } : undefined;
+  report.startupLog = await fs.readFile(join(testHome, 'user-data/logs/rex-architect.log'), 'utf8')
+    .then(text => redact(text).slice(-16_000)).catch(() => undefined);
+  report.pages = [];
+  for (const page of (electron?.context.pages() ?? []).slice(0, 4)) {
+    let timer;
+    try {
+      const state = await Promise.race([
+        page.evaluate(async () => {
+          let project;
+          if (location.protocol === 'http:' && location.hostname === '127.0.0.1') {
+            try {
+              const state = await (await fetch('/api/project', { signal: AbortSignal.timeout(1000) })).json();
+              project = { phase: state.phase, analysis: state.analysis, hasShownSnapshot: !!state.shown, hasModel: !!state.model };
+            } catch (error) { project = { error: String(error) }; }
+          }
+          return { url: location.href, title: document.title, text: document.body?.innerText.slice(0, 6000), project,
+            testIds: [...document.querySelectorAll('[data-testid]')].slice(0, 80).map(element => element.getAttribute('data-testid')) };
+        }),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Diagnostic page read timed out')), 3000); }),
+      ]);
+      report.pages.push(state);
+      if (!report.failureScreenshot) {
+        await page.screenshot({ path: join(output, 'sample-model.png'), timeout: 5000 });
+        report.failureScreenshot = true;
+      }
+    } catch (diagnosticError) { report.pages.push({ url: page.url(), diagnosticError: String(diagnosticError) }); }
+    finally { clearTimeout(timer); }
+  }
+}
 finally {
   console.log('phase: quitting');
   closing = true;
   if (electron) {
     try { await electron.close(); report.cleanQuit = true; }
-    catch (error) { report.passed = false; report.error = String(error); process.exitCode = 1; }
+    catch (error) { report.passed = false; report.quitError = String(error); report.error ??= String(error); process.exitCode = 1; }
   }
   console.log('phase: closing fixture server');
   if (server) { server.closeAllConnections(); await new Promise(done => server.close(done)); }
