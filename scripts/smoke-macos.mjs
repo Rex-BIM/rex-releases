@@ -5,7 +5,7 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { _electron } from 'playwright-core';
+import { launchMacApp } from './launch-macos-app.mjs';
 
 const appPath = resolve(process.argv[2] ?? ''), output = resolve(process.argv[3] ?? 'verification-output');
 assert.ok(appPath.endsWith('.app')); assert.equal(process.platform, 'darwin'); assert.equal(process.arch, 'arm64');
@@ -20,6 +20,7 @@ if (process.env.EXPECTED_MACOS_MAJOR) assert.equal(report.os.split('.')[0], proc
 let electron, server, closing = false;
 report.teardownNetworkCancellations = [];
 try {
+  console.log('phase: bundled tools');
   // Cold-start the self-contained .NET runtime and parse one original line in a minimal drawing.
   const dxf = join(root, 'one-line.dxf');
   await fs.writeFile(dxf, ['0','SECTION','2','HEADER','9','$ACADVER','1','AC1027','0','ENDSEC',
@@ -58,10 +59,14 @@ try {
   await fs.cp(join(resources, 'app/samples/architect-office'), project, { recursive: true });
   const at = new Date().toISOString();
   await fs.writeFile(join(profile, 'first-run.json'), JSON.stringify({ version: 1, stage: 'done', startedAt: at, doneAt: at, reason: 'existing' }));
-  electron = await _electron.launch({ executablePath: join(appPath, 'Contents/MacOS/Rex Architect'),
+  console.log('phase: launch app');
+  electron = await launchMacApp({ executablePath: join(appPath, 'Contents/MacOS/Rex Architect'),
     args: ['--use-mock-keychain', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', `--rex-test-home=${testHome}`, `--project=${project}`],
     env: { HOME: home, USER: process.env.USER ?? 'runner', TMPDIR: root, PATH: '/usr/bin:/bin:/usr/sbin:/sbin' }, timeout: 60_000 });
+  console.log('phase: renderer connected');
   const page = await electron.firstWindow();
+  await page.bringToFront();
+  console.log('phase: waiting for model');
   page.on('pageerror', error => report.rendererErrors.push(error.message));
   page.on('console', message => {
     if (message.type() !== 'error') return;
@@ -82,14 +87,20 @@ try {
   const canvas = page.locator('[data-testid="viewport"]:visible canvas').first();
   await canvas.waitFor({ state: 'visible' });
   assert.equal(await canvas.evaluate(element => !!element.getContext('webgl2')), true, 'A real WebGL2 context must exist');
+  console.log('phase: rendering');
   await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
   await page.screenshot({ path: join(output, 'sample-model.png') });
   assert.deepEqual(report.rendererErrors, []); report.webgl = true; report.passed = true;
 } catch (error) { report.error = String(error); process.exitCode = 1; }
 finally {
+  console.log('phase: quitting');
   closing = true;
-  if (electron) await electron.close().catch(() => undefined);
-  if (server) await new Promise(done => server.close(done));
+  if (electron) {
+    try { await electron.close(); report.cleanQuit = true; }
+    catch (error) { report.passed = false; report.error = String(error); process.exitCode = 1; }
+  }
+  console.log('phase: closing fixture server');
+  if (server) { server.closeAllConnections(); await new Promise(done => server.close(done)); }
   if (report.rendererErrors.length) { report.passed = false; report.error ??= 'Renderer errors occurred'; process.exitCode = 1; }
   await fs.writeFile(join(output, 'runtime-verification.json'), JSON.stringify(report, null, 2)+'\n');
   await fs.rm(root, { recursive: true, force: true });
