@@ -36,6 +36,7 @@ export async function launchMacApp({ executablePath, args = [], env, timeout = 6
     return {
       browser,
       context,
+      diagnostics: () => ({ exit: exitResult, stderr: tail }),
       firstWindow: async () => context.pages()[0] ?? await context.waitForEvent('page', { timeout }),
       on: (event, listener) => context.on(event === 'window' ? 'page' : event, listener),
       waitForEvent: (event, options) => context.waitForEvent(event === 'window' ? 'page' : event, options),
