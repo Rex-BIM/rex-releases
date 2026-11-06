@@ -49,6 +49,14 @@ const build = JSON.parse(await readFile(join(app, 'Contents/Resources/app/build-
 assert.equal(build.version, version); assert.match(build.commit, /^[a-f0-9]{7,40}$/);
 assert.ok(release.sourceCommit.startsWith(build.commit));
 assert.equal(build.repository, undefined, 'No build-machine path ships in the app');
+const framework = await readFile(join(app, 'Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework'));
+const sentinel = Buffer.from('dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX');
+const at = framework.indexOf(sentinel);
+assert.ok(at >= 0 && framework.indexOf(sentinel, at + 1) < 0, 'One Electron fuse wire is required');
+const wire = at + sentinel.length;
+assert.equal(framework[wire], 1); assert.ok(framework[wire + 1] > 3);
+for (const index of [0, 2, 3]) assert.equal(framework[wire + 2 + index], 0x30, `Distribution fuse ${index} must be off`);
+
 run('/usr/bin/codesign', ['--verify', '--deep', '--strict', app]);
 // codesign displays signature metadata on stderr, so query it without exposing any keychain.
 const { spawnSync } = await import('node:child_process');
@@ -62,5 +70,6 @@ await writeFile(join(output, 'package-verification.json'), JSON.stringify({
   passed: true, os, architecture: process.arch, version, sourceCommit: release.sourceCommit,
   sha256: release.sha256, bytes, strictSignature: true, developerIdTeam: 'U928CCRQ2N',
   hardenedRuntime: true, secureTimestamp: true, stapledTicket: true, gatekeeper: true,
+  runAsNode: false, nodeOptions: false, nodeCliInspect: false,
 }, null, 2) + '\n');
 console.log(`Verified Rex ${version} ZIP, provenance, signature and notarization on macOS ${os}.`);
